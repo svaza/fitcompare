@@ -16,8 +16,9 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup Node
@@ -31,15 +32,19 @@ jobs:
       - name: Build project
         run: npm run build
 
-      # ⬇️ THIS IS THE CORRECT NON-DEPRECATED ACTION
-      - name: Upload build artifacts
+      - name: Upload static files
         uses: actions/upload-pages-artifact@v2
         with:
-          path: dist  # or build for CRA
+          path: dist   # Change to 'build' if CRA
 
   deploy:
     needs: build
     runs-on: ubuntu-latest
     environment:
       name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v2
