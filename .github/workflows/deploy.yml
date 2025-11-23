@@ -9,33 +9,37 @@ permissions:
   pages: write
   id-token: write
 
+concurrency:
+  group: "pages"
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
+      - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
 
       - name: Install dependencies
         run: npm install
 
-      - name: Build
+      - name: Build project
         run: npm run build
 
-      - name: Upload artifact
+      # ⬇️ THIS IS THE CORRECT NON-DEPRECATED ACTION
+      - name: Upload build artifacts
         uses: actions/upload-pages-artifact@v2
         with:
-          path: dist   # or build for CRA
+          path: dist  # or build for CRA
 
   deploy:
     needs: build
     runs-on: ubuntu-latest
     environment:
       name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-
-    steps:
-      - name: Deploy
-        id: deployment
-        uses: actions/deploy-pages@v2
+      url: ${{ steps.deploy.outputs.page_url }}
