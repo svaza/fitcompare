@@ -1,83 +1,176 @@
 // Types for simplified FIT data structure
 export interface SimplifiedLapRecord {
-  timestamp: string;
-  heartRate: number | null;
+  timestamp: string
+  heartRate: number | null
 }
 
 export interface SimplifiedActivity {
-  sport: string;
-  subSport: string;
-  timestamp: string;
-  startTime: string;
-  avgHeartRate: number;
-  maxHeartRate: number;
-  records: SimplifiedLapRecord[];
+  sport: string
+  subSport: string
+  timestamp: string
+  startTime: string
+  avgHeartRate: number
+  maxHeartRate: number
+  records: SimplifiedLapRecord[]
 }
 
 export interface SimplifiedFitData {
   userProfile: {
-    friendlyName?: string;
-    weight?: number;
-    gender?: string;
-    restingHeartRate?: number;
-  };
-  activities: SimplifiedActivity[];
+    friendlyName?: string
+    weight?: number
+    gender?: string
+    restingHeartRate?: number
+  }
+  activities: SimplifiedActivity[]
+}
+
+type UnknownRecord = Record<string, unknown>
+
+function asRecord(value: unknown): UnknownRecord {
+  return typeof value === 'object' && value !== null
+    ? (value as UnknownRecord)
+    : {}
+}
+
+function asOptionalString(value: unknown): string | undefined {
+  return typeof value === 'string' ? value : undefined
+}
+
+function asOptionalNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+
+function asNumber(value: unknown): number {
+  return asOptionalNumber(value) ?? 0
+}
+
+function asArray(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : []
+}
+
+function asTimestamp(...values: unknown[]): string {
+  for (const value of values) {
+    if (!(value instanceof Date) && typeof value !== 'string' && typeof value !== 'number') {
+      continue
+    }
+
+    const date = value instanceof Date ? value : new Date(value)
+    if (Number.isFinite(date.getTime())) {
+      return date.toISOString()
+    }
+  }
+
+  return ''
+}
+
+function getActivityEndTimestamp(
+  declaredEnd: string,
+  records: SimplifiedLapRecord[],
+): string {
+  let endTimestamp = declaredEnd
+  let endTimeMs = new Date(declaredEnd).getTime()
+
+  records.forEach((record) => {
+    const recordTimeMs = new Date(record.timestamp).getTime()
+    if (!Number.isFinite(recordTimeMs) || recordTimeMs <= endTimeMs) return
+
+    endTimestamp = record.timestamp
+    endTimeMs = recordTimeMs
+  })
+
+  return endTimestamp
 }
 
 /**
- * Parse raw FIT data and consolidate into simplified records
- * Extracts sport, activity timestamp, and consolidates lap information with heart rate
+ * Parse raw FIT data and consolidate it into the fields used by the UI.
+ * The FIT parser returns Date objects at runtime, so timestamps are normalized
+ * to ISO strings here before any comparison is attempted.
  */
 export function parseFitData(rawData: unknown): SimplifiedFitData {
-  const data = rawData as any;
+  const data = asRecord(rawData)
+  const rawUserProfile = asRecord(data.user_profile)
+  const rawActivity = asRecord(data.activity)
+  const topLevelRecords = asArray(data.records)
 
-  // Extract user profile info
   const userProfile = {
-    friendlyName: data.user_profile?.friendly_name,
-    weight: data.user_profile?.weight,
-    gender: data.user_profile?.gender,
-    restingHeartRate: data.user_profile?.resting_heart_rate,
-  };
-
-  // Extract and consolidate activity data
-  const activities: SimplifiedActivity[] = [];
-
-  if (data.activity && data.activity.sessions) {
-    data.activity.sessions.forEach((session: any) => {
-      // Consolidate laps with heart rate information
-      const laps: SimplifiedLapRecord[] = [];
-
-      if (session.laps && Array.isArray(session.laps)) {
-        session.laps.forEach((lap: any) => {
-          // Create a lap record with timestamp and average heart rate
-          if(lap.records && lap.records.length > 0) {
-            lap.records.forEach((record: any) => {
-              laps.push({
-                timestamp: record.timestamp || lap.start_time,
-                heartRate: record.heart_rate || 0,
-              });
-            });
-          }
-        });
-      }
-
-      // Create simplified activity record
-      const activity: SimplifiedActivity = {
-        sport: session.sport || 'unknown',
-        subSport: session.sub_sport || 'unknown',
-        timestamp: session.timestamp || data.activity.timestamp,
-        startTime: session.start_time || data.activity.timestamp,
-        avgHeartRate: session.avg_heart_rate || 0,
-        maxHeartRate: session.max_heart_rate || 0,
-        records: laps,
-      };
-
-      activities.push(activity);
-    });
+    friendlyName: asOptionalString(rawUserProfile.friendly_name),
+    weight: asOptionalNumber(rawUserProfile.weight),
+    gender: asOptionalString(rawUserProfile.gender),
+    restingHeartRate: asOptionalNumber(rawUserProfile.resting_heart_rate),
   }
+
+  const activities: SimplifiedActivity[] = []
+  const sessions = asArray(rawActivity.sessions)
+
+  sessions.forEach((rawSession, sessionIndex) => {
+    const session = asRecord(rawSession)
+    const records: SimplifiedLapRecord[] = []
+    const laps = asArray(session.laps)
+
+    laps.forEach((rawLap) => {
+      const lap = asRecord(rawLap)
+      const lapRecords = asArray(lap.records)
+
+      lapRecords.forEach((rawRecord) => {
+        const record = asRecord(rawRecord)
+        const timestamp = asTimestamp(record.timestamp, lap.start_time)
+
+        if (!timestamp) return
+
+        records.push({
+          timestamp,
+          heartRate: asOptionalNumber(record.heart_rate) ?? null,
+        })
+      })
+    })
+
+    // In list/both parser modes, record messages are also available at the
+    // top level. Use them when a session has no laps (or its laps have no
+    // records), which is valid for activities recorded by some devices/apps.
+    if (records.length === 0 && topLevelRecords.length > 0) {
+      const nextSession = asRecord(sessions[sessionIndex + 1])
+      const sessionStartMs = new Date(
+        asTimestamp(session.start_time, session.timestamp),
+      ).getTime()
+      const nextSessionStartMs = new Date(
+        asTimestamp(nextSession.start_time, nextSession.timestamp),
+      ).getTime()
+
+      topLevelRecords.forEach((rawRecord) => {
+        const record = asRecord(rawRecord)
+        const timestamp = asTimestamp(record.timestamp)
+        const timestampMs = new Date(timestamp).getTime()
+
+        if (!timestamp || !Number.isFinite(timestampMs)) return
+        if (Number.isFinite(sessionStartMs) && timestampMs < sessionStartMs) return
+        if (Number.isFinite(nextSessionStartMs) && timestampMs >= nextSessionStartMs) return
+
+        records.push({
+          timestamp,
+          heartRate: asOptionalNumber(record.heart_rate) ?? null,
+        })
+      })
+    }
+
+    const declaredEnd = asTimestamp(
+      session.timestamp,
+      rawActivity.timestamp,
+      session.start_time,
+    )
+
+    activities.push({
+      sport: asOptionalString(session.sport) ?? 'unknown',
+      subSport: asOptionalString(session.sub_sport) ?? 'unknown',
+      timestamp: getActivityEndTimestamp(declaredEnd, records),
+      startTime: asTimestamp(session.start_time, rawActivity.timestamp),
+      avgHeartRate: asNumber(session.avg_heart_rate),
+      maxHeartRate: asNumber(session.max_heart_rate),
+      records,
+    })
+  })
 
   return {
     userProfile,
     activities,
-  };
+  }
 }

@@ -251,6 +251,23 @@
   margin: 0;
 }
 
+.overlap-summary {
+  margin-bottom: 0.75rem;
+  color: #bbb;
+  font-size: 0.9rem;
+  text-align: left;
+}
+
+.no-chart-data {
+  min-height: 220px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem;
+  color: #ffa500;
+  font-weight: 700;
+}
+
 /* ECharts Container */
 .echarts-container {
   width: 100%;
@@ -548,4 +565,3 @@
     font-size: 0.8rem;
   }
 }
-

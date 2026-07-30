@@ -1,7 +1,11 @@
-import { useState, useRef, useEffect } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 import FitParser from 'fit-file-parser'
 import { parseFitData, type SimplifiedFitData, type SimplifiedActivity } from './utils/fitDataParser'
+import {
+  getHeartRateOverlap,
+  type HeartRateSample,
+} from './utils/heartRateComparison'
 import * as echarts from 'echarts'
 
 interface FileData {
@@ -9,66 +13,49 @@ interface FileData {
   activity: SimplifiedActivity
 }
 
-interface GraphDataPoint {
-  timestamp: string
-  [key: string]: string | number
+interface HeartRateSeries {
+  name: string
+  samples: HeartRateSample[]
+}
+
+interface HeartRateChartData {
+  startTimeMs: number
+  endTimeMs: number
+  series: [HeartRateSeries, HeartRateSeries]
+}
+
+interface ZoomRange {
+  startPercent: number
+  endPercent: number
 }
 
 interface EChartsComponentProps {
-  data: GraphDataPoint[]
-  zoomIndex: { startIndex: number; endIndex: number } | null
-  onZoomChange: (range: { startIndex: number; endIndex: number } | null) => void
+  chartData: HeartRateChartData
+  zoomRange: ZoomRange | null
+  onZoomChange: (range: ZoomRange | null) => void
 }
 
 const EChartsComponent: React.FC<EChartsComponentProps> = ({
-  data,
-  zoomIndex,
+  chartData,
+  zoomRange,
   onZoomChange,
 }) => {
   const chartRef = useRef<HTMLDivElement>(null)
   const chartInstanceRef = useRef<echarts.ECharts | null>(null)
 
   useEffect(() => {
-    if (!chartRef.current || data.length === 0) return
+    if (!chartRef.current) return
 
-    // Initialize chart
-    if (!chartInstanceRef.current) {
+    if (!chartInstanceRef.current || chartInstanceRef.current.isDisposed()) {
       chartInstanceRef.current = echarts.init(chartRef.current, 'dark')
     }
 
     const chart = chartInstanceRef.current
+    const seriesNames = chartData.series.map((series) => series.name)
 
-    // Extract actual series names from data (keys other than 'timestamp')
-    const seriesNames: string[] = []
-    if (data.length > 0) {
-      Object.keys(data[0]).forEach((key) => {
-        if (key !== 'timestamp') {
-          seriesNames.push(key)
-        }
-      })
-    }
-
-    console.log('ECharts Data Debug:', {
-      dataLength: data.length,
-      seriesNames,
-      firstDataPoint: data[0],
-    })
-
-    // Validate data
-    if (seriesNames.length === 0 || data.length === 0) {
-      console.warn('No data to render:', { seriesNames, dataLength: data.length })
-      return
-    }
-
-    // Transform data for ECharts
-    const timestamps = data.map((d) => new Date(d.timestamp).toLocaleTimeString())
-    const seriesData = seriesNames.map((name) => data.map((d) => d[name] || null))
-
-    console.log('Series Data Lengths:', seriesData.map((s) => s.length))
-
-    // Build chart options
     const options: echarts.EChartsOption = {
       backgroundColor: 'rgba(10, 14, 39, 0)',
+      animation: false,
       textStyle: {
         color: '#bbb',
       },
@@ -81,6 +68,9 @@ const EChartsComponent: React.FC<EChartsComponentProps> = ({
       },
       tooltip: {
         trigger: 'axis',
+        axisPointer: {
+          type: 'cross',
+        },
         backgroundColor: '#1a1f3a',
         borderColor: '#ff6b35',
         borderWidth: 2,
@@ -96,8 +86,9 @@ const EChartsComponent: React.FC<EChartsComponentProps> = ({
         bottom: 50,
       },
       xAxis: {
-        type: 'category',
-        data: timestamps,
+        type: 'time',
+        min: chartData.startTimeMs,
+        max: chartData.endTimeMs,
         axisLine: {
           lineStyle: {
             color: '#444',
@@ -105,8 +96,8 @@ const EChartsComponent: React.FC<EChartsComponentProps> = ({
         },
         axisLabel: {
           color: '#bbb',
-          interval: Math.max(0, Math.floor(data.length / 12)),
           rotate: -45,
+          formatter: (value: number) => new Date(value).toLocaleTimeString(),
         },
       },
       yAxis: {
@@ -136,8 +127,8 @@ const EChartsComponent: React.FC<EChartsComponentProps> = ({
         {
           type: 'slider',
           show: true,
-          start: zoomIndex ? (zoomIndex.startIndex / data.length) * 100 : 0,
-          end: zoomIndex ? ((zoomIndex.endIndex + 1) / data.length) * 100 : 100,
+          start: zoomRange?.startPercent ?? 0,
+          end: zoomRange?.endPercent ?? 100,
           textStyle: {
             color: '#bbb',
           },
@@ -145,49 +136,47 @@ const EChartsComponent: React.FC<EChartsComponentProps> = ({
         },
         {
           type: 'inside',
-          start: zoomIndex ? (zoomIndex.startIndex / data.length) * 100 : 0,
-          end: zoomIndex ? ((zoomIndex.endIndex + 1) / data.length) * 100 : 100,
+          start: zoomRange?.startPercent ?? 0,
+          end: zoomRange?.endPercent ?? 100,
         },
       ],
-      series: seriesNames.map((name, index) => ({
-        name,
+      series: chartData.series.map((series, index) => ({
+        name: series.name,
         type: 'line',
-        data: seriesData[index],
+        data: series.samples.map((sample) => [sample.timestampMs, sample.heartRate]),
         lineStyle: {
           color: index === 0 ? '#ff6b35' : '#3498db',
           width: 2,
         },
         smooth: false,
         symbol: 'none',
+        showSymbol: false,
         sampling: 'lttb',
       })),
     }
 
-    chart.setOption(options)
+    chart.setOption(options, { notMerge: true })
 
-    // Handle zoom events
     const handleDataZoom = () => {
-      const option = chart.getOption() as echarts.EChartsOption
-      const dataZoomOption = (option.dataZoom as echarts.DataZoomComponentOption[]) || []
+      const option = chart.getOption() as unknown as {
+        dataZoom?: Array<{ start?: number; end?: number }>
+      }
+      const dataZoomOption = option.dataZoom ?? []
 
       if (dataZoomOption.length > 0) {
-        const start = (dataZoomOption[0].start as number) || 0
-        const end = (dataZoomOption[0].end as number) || 100
+        const startPercent = dataZoomOption[0].start ?? 0
+        const endPercent = dataZoomOption[0].end ?? 100
 
-        const startIndex = Math.floor((start / 100) * data.length)
-        const endIndex = Math.floor((end / 100) * data.length) - 1
-
-        if (startIndex === 0 && endIndex === data.length - 1) {
+        if (startPercent <= 0 && endPercent >= 100) {
           onZoomChange(null)
         } else {
-          onZoomChange({ startIndex, endIndex })
+          onZoomChange({ startPercent, endPercent })
         }
       }
     }
 
     chart.on('datazoom', handleDataZoom)
 
-    // Handle window resize
     const handleResize = () => {
       chart.resize()
     }
@@ -198,7 +187,14 @@ const EChartsComponent: React.FC<EChartsComponentProps> = ({
       window.removeEventListener('resize', handleResize)
       chart.off('datazoom', handleDataZoom)
     }
-  }, [data, zoomIndex, onZoomChange])
+  }, [chartData, zoomRange, onZoomChange])
+
+  useEffect(() => {
+    return () => {
+      chartInstanceRef.current?.dispose()
+      chartInstanceRef.current = null
+    }
+  }, [])
 
   return <div ref={chartRef} className="echarts-container" />
 }
@@ -207,7 +203,7 @@ function App() {
   const [file1Data, setFile1Data] = useState<FileData | null>(null)
   const [file2Data, setFile2Data] = useState<FileData | null>(null)
   const [showComparison, setShowComparison] = useState(false)
-  const [zoomIndex, setZoomIndex] = useState<{ startIndex: number; endIndex: number } | null>(null)
+  const [zoomRange, setZoomRange] = useState<ZoomRange | null>(null)
 
   const parseFile = (file: File, setData: (data: FileData) => void) => {
     const reader = new FileReader()
@@ -221,7 +217,9 @@ function App() {
         temperatureUnit: 'celsius',
         pressureUnit: 'bar',
         elapsedRecordField: true,
-        mode: 'cascade',
+        // Keep both the nested activity tree and the top-level message lists.
+        // Some valid FIT files contain records without any lap messages.
+        mode: 'both',
       })
 
       fitParser.parse(arrayBuffer, (error: Error | null, data: unknown) => {
@@ -269,92 +267,37 @@ function App() {
     return name.replace(/\.[^/.]+$/, '')
   }
 
-  const getCombinedGraphData = (): GraphDataPoint[] => {
-    if (!file1Data || !file2Data) return []
+  const heartRateChartData = useMemo<HeartRateChartData | null>(() => {
+    if (!file1Data || !file2Data) return null
+
+    const overlap = getHeartRateOverlap(
+      file1Data.activity.records,
+      file2Data.activity.records,
+    )
+
+    if (!overlap) return null
 
     const file1Name = getFileName(file1Data.fileName)
     const file2Name = getFileName(file2Data.fileName)
-    
-    // Create unique series names - if names are identical, append (1) and (2)
     const series1Name = file1Name === file2Name ? `${file1Name} (1)` : file1Name
     const series2Name = file1Name === file2Name ? `${file2Name} (2)` : file2Name
-    
-    // Sort both file records by timestamp for proper merging
-    const file1Records = [...file1Data.activity.records].sort(
-      (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
-    )
-    const file2Records = [...file2Data.activity.records].sort(
-      (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
-    )
-    
-    const dataMap = new Map<string, GraphDataPoint>()
-    
-    // Use a more robust merging strategy
-    let file2Index = 0
-    
-    file1Records.forEach((record1) => {
-      const timestamp1 = new Date(record1.timestamp).getTime()
-      const point: GraphDataPoint = {
-        timestamp: record1.timestamp,
-        [series1Name]: record1.heartRate || 0,
-      }
-      
-      // Try to find matching record from file2
-      if (file2Index < file2Records.length) {
-        const record2 = file2Records[file2Index]
-        const timestamp2 = new Date(record2.timestamp).getTime()
-        
-        // If timestamps are close (within 1 second), consider them a match
-        if (Math.abs(timestamp1 - timestamp2) < 1000) {
-          point[series2Name] = record2.heartRate || 0
-          file2Index++
-        }
-      }
-      
-      dataMap.set(record1.timestamp, point)
-    })
-    
-    // Add any remaining file2 records that didn't have a file1 match
-    while (file2Index < file2Records.length) {
-      const record2 = file2Records[file2Index]
-      const existing = dataMap.get(record2.timestamp)
-      if (existing) {
-        existing[series2Name] = record2.heartRate || 0
-      } else {
-        dataMap.set(record2.timestamp, {
-          timestamp: record2.timestamp,
-          [series2Name]: record2.heartRate || 0,
-        })
-      }
-      file2Index++
+
+    return {
+      startTimeMs: overlap.startTimeMs,
+      endTimeMs: overlap.endTimeMs,
+      series: [
+        { name: series1Name, samples: overlap.firstSamples },
+        { name: series2Name, samples: overlap.secondSamples },
+      ],
     }
+  }, [file1Data, file2Data])
 
-    const allData = Array.from(dataMap.values()).sort(
-      (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
-    )
-
-    console.log('Combined Graph Data Debug:', {
-      file1Name,
-      file2Name,
-      series1Name,
-      series2Name,
-      dataMapSize: dataMap.size,
-      file1Records: file1Data.activity.records.length,
-      file2Records: file2Data.activity.records.length,
-      allDataLength: allData.length,
-      sampleDataPoint: allData[0],
-    })
-
-    // Return full data (no filtering here for ReferenceArea to work)
-    return allData
-  }
-
-  const handleZoomChange = (range: { startIndex: number; endIndex: number } | null) => {
-    setZoomIndex(range)
-  }
+  const handleZoomChange = useCallback((range: ZoomRange | null) => {
+    setZoomRange(range)
+  }, [])
 
   const resetZoom = () => {
-    setZoomIndex(null)
+    setZoomRange(null)
   }
 
   return (
@@ -429,24 +372,39 @@ function App() {
                 <div className="graph-card">
                   <div className="graph-header">
                     <h5>Heart Rate Comparison</h5>
-                    {zoomIndex && (
+                    {zoomRange && heartRateChartData && (
                       <button className="btn btn-small btn-reset" onClick={resetZoom}>
                         Reset Zoom
                       </button>
                     )}
                   </div>
                   <div className="graph-instructions">
-                    {!zoomIndex ? (
+                    {!zoomRange ? (
                       <p>📍 Drag to select an area on the graph to zoom in | Scroll to zoom | Click reset to see full range</p>
                     ) : (
                       <p>🔍 Zoomed view | Click "Reset Zoom" to see full range</p>
                     )}
                   </div>
-                  <EChartsComponent
-                    data={getCombinedGraphData()}
-                    zoomIndex={zoomIndex}
-                    onZoomChange={handleZoomChange}
-                  />
+                  {heartRateChartData ? (
+                    <>
+                      <div className="overlap-summary">
+                        Shared recording window: {formatDate(new Date(heartRateChartData.startTimeMs).toISOString())}
+                        {' – '}
+                        {formatDate(new Date(heartRateChartData.endTimeMs).toISOString())}
+                        {' · '}
+                        {heartRateChartData.series[0].samples.length} / {heartRateChartData.series[1].samples.length} HR samples
+                      </div>
+                      <EChartsComponent
+                        chartData={heartRateChartData}
+                        zoomRange={zoomRange}
+                        onZoomChange={handleZoomChange}
+                      />
+                    </>
+                  ) : (
+                    <div className="no-chart-data">
+                      No shared time window with valid heart-rate samples was found in these files.
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
